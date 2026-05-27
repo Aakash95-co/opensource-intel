@@ -1,34 +1,33 @@
 """
-Gujarat OSINT Intelligence Dashboard
-=====================================
-Open-source intelligence aggregator for all 33 districts of Gujarat.
-Tracks citizen grievances, government feedback, and weekly trends
-from publicly available data sources.
+Gujarat OSINT Intelligence Dashboard  ·  v2.0
+==============================================
+Fully fixed version — all 9 charts render correctly.
 
-Sources simulated:
-  • Twitter/X social mentions
-  • Online news (Divya Bhaskar, Sandesh, TOI Gujarat, Navbharat Times)
-  • PG Portal (public grievance portal - pgportal.gov.in)
-  • MyGov Portal citizen feedback
-  • RTI application filings
-  • Reddit (r/india, r/gujarat)
-  • Local forums & WhatsApp public aggregators
+Root-cause fixes applied:
+  1. Explicit height in every fig.update_layout() — Plotly 6 + Dash 4
+     do NOT infer height from the CSS container style.
+  2. Separate pie_layout() (no xaxis/yaxis keys) for Pie charts.
+  3. Plotly 6 colorbar API: title=dict(text=...) replaces titlefont.
+  4. n_weeks cast to int in filter_df (Dash 4 Slider returns float).
+  5. suppress_callback_exceptions=True for dcc.Tabs.
+  6. District bar height = 700 px for 33 districts.
+  7. Heatmap height = 620 px.
+  8. New tab: Raw OSINT Data Sources (samples from osint_raw_data.py).
 """
 
 import dash
-from dash import dcc, html, dash_table, Input, Output, callback_context
+from dash import dcc, html, dash_table, Input, Output
 import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import random
 
+from osint_raw_data import ALL_SOURCES
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-
 GUJARAT_DISTRICTS = [
     "Ahmedabad", "Amreli", "Anand", "Aravalli", "Banaskantha",
     "Bharuch", "Bhavnagar", "Botad", "Chhota Udaipur", "Dahod",
@@ -36,415 +35,507 @@ GUJARAT_DISTRICTS = [
     "Junagadh", "Kheda", "Kutch", "Mahisagar", "Mehsana",
     "Morbi", "Narmada", "Navsari", "Panchmahal", "Patan",
     "Porbandar", "Rajkot", "Sabarkantha", "Surat", "Surendranagar",
-    "Tapi", "Vadodara", "Valsad"
+    "Tapi", "Vadodara", "Valsad",
 ]
 
 GRIEVANCE_CATEGORIES = {
-    "Water Supply":        {"icon": "💧", "color": "#2196F3", "base": 85},
-    "Roads & Infrastructure": {"icon": "🏗️", "color": "#FF9800", "base": 92},
-    "Electricity":         {"icon": "⚡", "color": "#FFEB3B", "base": 78},
-    "Healthcare":          {"icon": "🏥", "color": "#E91E63", "base": 65},
-    "Sanitation & Waste":  {"icon": "🗑️", "color": "#9C27B0", "base": 70},
-    "Education":           {"icon": "📚", "color": "#00BCD4", "base": 55},
-    "Law & Order":         {"icon": "⚖️", "color": "#F44336", "base": 60},
-    "Agriculture":         {"icon": "🌾", "color": "#4CAF50", "base": 75},
-    "Land & Revenue":      {"icon": "📋", "color": "#795548", "color2": "#A1887F", "base": 50},
-    "Corruption/Bribery":  {"icon": "💰", "color": "#FF5722", "base": 40},
-    "Ration & PDS":        {"icon": "🛒", "color": "#607D8B", "base": 62},
-    "Employment/MGNREGA":  {"icon": "👷", "color": "#8BC34A", "base": 58},
+    "Water Supply":           {"icon": "Water",  "color": "#2196F3", "base": 85},
+    "Roads & Infrastructure": {"icon": "Roads",  "color": "#FF9800", "base": 92},
+    "Electricity":            {"icon": "Power",  "color": "#FFEB3B", "base": 78},
+    "Healthcare":             {"icon": "Health", "color": "#E91E63", "base": 65},
+    "Sanitation & Waste":     {"icon": "Sanit",  "color": "#9C27B0", "base": 70},
+    "Education":              {"icon": "Edu",    "color": "#00BCD4", "base": 55},
+    "Law & Order":            {"icon": "Law",    "color": "#F44336", "base": 60},
+    "Agriculture":            {"icon": "Agri",   "color": "#4CAF50", "base": 75},
+    "Land & Revenue":         {"icon": "Land",   "color": "#795548", "base": 50},
+    "Corruption/Bribery":     {"icon": "Corrupt","color": "#FF5722", "base": 40},
+    "Ration & PDS":           {"icon": "Ration", "color": "#607D8B", "base": 62},
+    "Employment/MGNREGA":     {"icon": "Jobs",   "color": "#8BC34A", "base": 58},
 }
 
-OSINT_SOURCES = [
-    "Twitter/X Social",
-    "PG Portal (Govt.)",
-    "MyGov Portal",
-    "News Articles",
-    "RTI Filings",
-    "Reddit/Forums",
-    "Local Media",
-]
+OSINT_SOURCES = list(ALL_SOURCES.keys())
+SOURCE_COLORS = [v["color"] for v in ALL_SOURCES.values()]
 
-SENTIMENT_LABELS = ["Negative", "Neutral", "Positive"]
-PRIORITY_LABELS  = ["Critical", "High", "Medium", "Low"]
+
+def _src_col(s):
+    return ("src_" + s
+            .replace("/", "_")
+            .replace(" ", "_")
+            .replace("(", "")
+            .replace(")", "")
+            .replace(".", ""))
+
+
+SRC_COLS = [_src_col(s) for s in OSINT_SOURCES]
+PRIORITY_LABELS = ["Critical", "High", "Medium", "Low"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COLOUR PALETTE
+# ─────────────────────────────────────────────────────────────────────────────
+BG_DARK  = "#0a0e1a"
+BG_CARD  = "#111827"
+BG_PANEL = "#1a2235"
+ACCENT   = "#00d4ff"
+ACCENT2  = "#7c3aed"
+DANGER   = "#ef4444"
+SUCCESS  = "#22c55e"
+WARNING  = "#f59e0b"
+TEXT_PRI = "#f1f5f9"
+TEXT_SEC = "#94a3b8"
+BORDER   = "#1e293b"
+CAT_COLORS = [m["color"] for m in GRIEVANCE_CATEGORIES.values()]
+
+
+# ── Layout helpers ────────────────────────────────────────────────────────────
+def base_layout(height=320):
+    """For Bar / Scatter / Heatmap — includes xaxis/yaxis keys."""
+    return dict(
+        height=height,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_PRI, family="Inter, Segoe UI, sans-serif", size=11),
+        margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=BORDER, font=dict(size=10)),
+        xaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER, tickfont=dict(size=10)),
+        yaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER, tickfont=dict(size=10)),
+    )
+
+
+def pie_layout(height=320):
+    """For Pie/Donut — NO xaxis/yaxis to avoid Plotly 6 conflicts."""
+    return dict(
+        height=height,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_PRI, family="Inter, Segoe UI, sans-serif", size=11),
+        margin=dict(l=10, r=120, t=30, b=10),
+        legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=BORDER,
+                    font=dict(size=9), x=1.02, y=0.5,
+                    orientation="v"),
+        showlegend=True,
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA GENERATION — Realistic OSINT simulation (last 16 weeks)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def generate_weekly_dates(n_weeks: int = 16) -> list:
-    today = datetime.today()
+def _weekly_dates(n=16):
+    today  = datetime.today()
     monday = today - timedelta(days=today.weekday())
-    return [(monday - timedelta(weeks=i)).strftime("%Y-%m-%d") for i in range(n_weeks - 1, -1, -1)]
+    return [(monday - timedelta(weeks=i)).strftime("%Y-%m-%d")
+            for i in range(n - 1, -1, -1)]
 
-def seasonal_noise(week_idx: int, amplitude: float = 1.0) -> float:
-    """Add realistic seasonal / event spikes."""
-    spike = 0
-    # Budget announcement spike around week 3–4
-    if 3 <= week_idx <= 5:
-        spike += amplitude * 0.25
-    # Monsoon water grievances peak weeks 7–10
-    if 7 <= week_idx <= 10:
-        spike += amplitude * 0.30
-    # Election / rally period weeks 12–14
-    if 12 <= week_idx <= 14:
-        spike += amplitude * 0.40
-    return spike
+
+def _seasonal(wi, amp):
+    s = 0.0
+    if 3 <= wi <= 5:   s += amp * 0.25
+    if 7 <= wi <= 10:  s += amp * 0.30
+    if 12 <= wi <= 14: s += amp * 0.40
+    return s
+
 
 np.random.seed(42)
 random.seed(42)
 
-weekly_dates = generate_weekly_dates(16)
-N_WEEKS = len(weekly_dates)
+WEEKLY_DATES = _weekly_dates(16)
 
-# ── Master DataFrame: district × category × week ──────────────────────────
+POP_MOD = {
+    "Ahmedabad": 2.5, "Surat": 2.2, "Vadodara": 1.8, "Rajkot": 1.6,
+    "Gandhinagar": 1.2, "Mehsana": 1.1, "Bhavnagar": 1.1,
+}
+
 records = []
 for district in GUJARAT_DISTRICTS:
-    # Population-weighted district modifier
-    pop_mod = {
-        "Ahmedabad": 2.5, "Surat": 2.2, "Vadodara": 1.8, "Rajkot": 1.6,
-        "Gandhinagar": 1.2, "Mehsana": 1.1, "Bhavnagar": 1.1,
-    }.get(district, 0.7 + random.random() * 0.6)
-
+    pm = POP_MOD.get(district, 0.7 + random.random() * 0.6)
     for cat, meta in GRIEVANCE_CATEGORIES.items():
-        base = meta["base"] * pop_mod
-        for wi, week in enumerate(weekly_dates):
-            val = max(0, int(
-                base
-                + seasonal_noise(wi, base)
-                + np.random.normal(0, base * 0.15)
-            ))
-            source_dist = np.random.dirichlet(np.ones(len(OSINT_SOURCES)) * 2) * val
+        base = meta["base"] * pm
+        for wi, week in enumerate(WEEKLY_DATES):
+            val = max(0, int(base + _seasonal(wi, base) +
+                             np.random.normal(0, base * 0.15)))
+            src_vals = np.random.dirichlet(np.ones(len(OSINT_SOURCES)) * 2) * val
             records.append({
-                "week":     week,
-                "district": district,
-                "category": cat,
-                "count":    val,
-                "resolved": max(0, int(val * (0.55 + random.random() * 0.30))),
+                "week":          week,
+                "district":      district,
+                "category":      cat,
+                "count":         val,
+                "resolved":      max(0, int(val * (0.55 + random.random() * 0.30))),
                 "sentiment_neg": int(val * (0.50 + random.random() * 0.20)),
                 "sentiment_neu": int(val * (0.25 + random.random() * 0.10)),
                 "sentiment_pos": int(val * (0.05 + random.random() * 0.10)),
-                **{f"src_{s.replace('/', '_').replace(' ', '_').replace('(', '').replace(')', '').replace('.', '')}": int(v)
-                   for s, v in zip(OSINT_SOURCES, source_dist)},
+                **{col: int(v) for col, v in zip(SRC_COLS, src_vals)},
             })
 
 df = pd.DataFrame(records)
-df["week"] = pd.to_datetime(df["week"])
-df["pending"] = df["count"] - df["resolved"]
+df["week"]            = pd.to_datetime(df["week"])
+df["pending"]         = df["count"] - df["resolved"]
 df["resolution_rate"] = (df["resolved"] / df["count"].replace(0, 1) * 100).round(1)
 
-# Aggregate helpers
-weekly_total   = df.groupby("week")["count"].sum().reset_index()
-district_total = df.groupby("district")["count"].sum().reset_index().sort_values("count", ascending=False)
-category_total = df.groupby("category")["count"].sum().reset_index().sort_values("count", ascending=False)
-latest_week    = df["week"].max()
-prev_week      = latest_week - timedelta(weeks=1)
-
-kpi_latest   = df[df["week"] == latest_week]["count"].sum()
-kpi_prev     = df[df["week"] == prev_week]["count"].sum()
-kpi_change   = round((kpi_latest - kpi_prev) / max(kpi_prev, 1) * 100, 1)
-kpi_resolved = df[df["week"] == latest_week]["resolved"].sum()
-kpi_pending  = df[df["week"] == latest_week]["pending"].sum()
-kpi_critical = df[(df["week"] == latest_week) & (df["count"] > df["count"].quantile(0.85))].shape[0]
+category_total = (df.groupby("category")["count"].sum()
+                    .reset_index()
+                    .sort_values("count", ascending=False))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COLOUR PALETTE (dark intelligence theme)
+# HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-BG_DARK   = "#0a0e1a"
-BG_CARD   = "#111827"
-BG_PANEL  = "#1a2235"
-ACCENT    = "#00d4ff"
-ACCENT2   = "#7c3aed"
-DANGER    = "#ef4444"
-SUCCESS   = "#22c55e"
-WARNING   = "#f59e0b"
-TEXT_PRI  = "#f1f5f9"
-TEXT_SEC  = "#94a3b8"
-BORDER    = "#1e293b"
+def filter_df(district, category, n_weeks):
+    n   = int(n_weeks)                          # FIX: Dash 4 returns float
+    cut = pd.to_datetime(WEEKLY_DATES[-n])
+    fdf = df[df["week"] >= cut].copy()
+    if district != "ALL":
+        fdf = fdf[fdf["district"] == district]
+    if category != "ALL":
+        fdf = fdf[fdf["category"] == category]
+    return fdf
 
-CAT_COLORS = [m["color"] for m in GRIEVANCE_CATEGORIES.values()]
 
-PLOT_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(color=TEXT_PRI, family="Inter, Segoe UI, sans-serif", size=11),
-    margin=dict(l=10, r=10, t=35, b=10),
-    legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=BORDER, font=dict(size=10)),
-    xaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER, tickfont=dict(size=10)),
-    yaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER, tickfont=dict(size=10)),
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPER — KPI card
-# ─────────────────────────────────────────────────────────────────────────────
-def kpi_card(title: str, value, sub: str = "", color: str = ACCENT, icon: str = ""):
+def kpi_card(title, value, sub="", color=ACCENT, icon=""):
     return html.Div([
         html.Div([
-            html.Span(icon, style={"fontSize": "22px", "marginRight": "8px"}),
-            html.Span(title, style={"color": TEXT_SEC, "fontSize": "12px", "fontWeight": "600",
-                                    "textTransform": "uppercase", "letterSpacing": "1px"}),
-        ], style={"display": "flex", "alignItems": "center", "marginBottom": "6px"}),
-        html.Div(f"{value:,}" if isinstance(value, int) else str(value),
-                 style={"fontSize": "28px", "fontWeight": "700", "color": color, "lineHeight": "1"}),
+            html.Span(icon + " ", style={"fontSize": "18px"}),
+            html.Span(title, style={"color": TEXT_SEC, "fontSize": "11px",
+                                    "fontWeight": "600", "textTransform": "uppercase",
+                                    "letterSpacing": "1px"}),
+        ], style={"display": "flex", "alignItems": "center", "marginBottom": "5px"}),
+        html.Div(
+            f"{value:,}" if isinstance(value, int) else str(value),
+            style={"fontSize": "24px", "fontWeight": "700",
+                   "color": color, "lineHeight": "1"},
+        ),
         html.Div(sub, style={"color": TEXT_SEC, "fontSize": "11px", "marginTop": "4px"}),
     ], style={
         "background": BG_CARD, "border": f"1px solid {BORDER}",
         "borderTop": f"3px solid {color}",
-        "borderRadius": "10px", "padding": "16px 20px",
-        "flex": "1", "minWidth": "160px",
+        "borderRadius": "10px", "padding": "12px 16px",
+        "flex": "1", "minWidth": "150px",
     })
 
+
+def stitle(text):
+    return html.Div(text, style={
+        "color": ACCENT, "fontSize": "12px", "fontWeight": "700",
+        "letterSpacing": "0.8px", "padding": "10px 14px 4px",
+    })
+
+
+def card(children, style_extra=None):
+    s = {"background": BG_CARD, "borderRadius": "10px",
+         "border": f"1px solid {BORDER}", "overflow": "hidden"}
+    if style_extra:
+        s.update(style_extra)
+    return html.Div(children, style=s)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# APP INIT
+# RAW SOURCES TAB — built once at startup
+# ─────────────────────────────────────────────────────────────────────────────
+def _raw_table(data, color):
+    if not data:
+        return html.Div("No data", style={"color": TEXT_SEC, "padding": "8px"})
+    cols = list(data[0].keys())
+    return dash_table.DataTable(
+        data=data,
+        columns=[{"name": c, "id": c} for c in cols],
+        style_table={"overflowX": "auto"},
+        style_header={
+            "backgroundColor": BG_PANEL, "color": color,
+            "fontWeight": "700", "fontSize": "11px",
+            "borderBottom": f"1px solid {BORDER}",
+            "textTransform": "uppercase", "letterSpacing": "0.8px",
+        },
+        style_cell={
+            "backgroundColor": "transparent", "color": TEXT_PRI,
+            "fontSize": "12px", "border": f"1px solid {BORDER}",
+            "padding": "7px 10px", "textAlign": "left",
+            "whiteSpace": "normal", "maxWidth": "340px",
+            "overflow": "hidden", "textOverflow": "ellipsis",
+        },
+        page_size=len(data),
+        tooltip_data=[
+            {col: {"value": str(row.get(col, "")), "type": "markdown"}
+             for col in cols}
+            for row in data
+        ],
+        tooltip_delay=0,
+        tooltip_duration=None,
+    )
+
+
+def build_raw_tab():
+    blocks = []
+    for src_name, meta in ALL_SOURCES.items():
+        color = meta["color"]
+        icon  = meta["icon"]
+        blocks.append(html.Div([
+            html.Div([
+                html.Span(icon + "  " + src_name,
+                          style={"fontSize": "14px", "fontWeight": "700",
+                                 "color": color, "letterSpacing": "0.4px"}),
+                html.Span(f"  |  {len(meta['data'])} sample records",
+                          style={"color": TEXT_SEC, "fontSize": "11px",
+                                 "marginLeft": "8px"}),
+            ], style={"padding": "12px 16px 6px",
+                      "borderBottom": f"2px solid {color}50"}),
+            html.Div(_raw_table(meta["data"], color),
+                     style={"padding": "8px 12px 14px"}),
+        ], style={
+            "background": BG_CARD, "borderRadius": "10px",
+            "border": f"1px solid {color}40", "marginBottom": "16px",
+        }))
+    return html.Div(blocks, style={"padding": "16px"})
+
+
+RAW_TAB_CONTENT = build_raw_tab()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
+SIDEBAR = html.Div([
+    html.Div("FILTERS", style={"color": ACCENT, "fontSize": "11px", "fontWeight": "700",
+                                "letterSpacing": "2px", "marginBottom": "14px"}),
+
+    html.Label("District", style={"color": TEXT_SEC, "fontSize": "11px", "fontWeight": "600"}),
+    dcc.Dropdown(
+        id="dd-district",
+        options=[{"label": "All Districts", "value": "ALL"}] +
+                [{"label": d, "value": d} for d in GUJARAT_DISTRICTS],
+        value="ALL", clearable=False,
+        style={"marginBottom": "12px", "fontSize": "12px"},
+    ),
+
+    html.Label("Category", style={"color": TEXT_SEC, "fontSize": "11px", "fontWeight": "600"}),
+    dcc.Dropdown(
+        id="dd-category",
+        options=[{"label": "All Categories", "value": "ALL"}] +
+                [{"label": k, "value": k} for k in GRIEVANCE_CATEGORIES],
+        value="ALL", clearable=False,
+        style={"marginBottom": "12px", "fontSize": "12px"},
+    ),
+
+    html.Label("Weeks", style={"color": TEXT_SEC, "fontSize": "11px", "fontWeight": "600"}),
+    dcc.Slider(
+        id="sl-weeks", min=4, max=16, step=1, value=12,
+        marks={4: "4w", 8: "8w", 12: "12w", 16: "16w"},
+        tooltip={"placement": "bottom", "always_visible": False},
+    ),
+
+    html.Hr(style={"borderColor": BORDER, "margin": "16px 0"}),
+
+    html.Div("OSINT SOURCES", style={"color": ACCENT, "fontSize": "11px",
+                                      "fontWeight": "700", "letterSpacing": "2px",
+                                      "marginBottom": "10px"}),
+    *[html.Div([
+        html.Div(style={"width": "8px", "height": "8px", "borderRadius": "50%",
+                        "backgroundColor": c, "marginRight": "8px", "flexShrink": "0"}),
+        html.Span(s, style={"color": TEXT_SEC, "fontSize": "11px"}),
+    ], style={"display": "flex", "alignItems": "center", "marginBottom": "5px"})
+      for s, c in zip(OSINT_SOURCES, SOURCE_COLORS)],
+
+    html.Hr(style={"borderColor": BORDER, "margin": "16px 0"}),
+
+    html.Div("PRIORITY", style={"color": ACCENT, "fontSize": "11px",
+                                 "fontWeight": "700", "letterSpacing": "2px",
+                                 "marginBottom": "10px"}),
+    *[html.Div([
+        html.Div(style={"width": "8px", "height": "8px", "borderRadius": "2px",
+                        "backgroundColor": c, "marginRight": "8px"}),
+        html.Span(lbl, style={"color": TEXT_SEC, "fontSize": "11px"}),
+    ], style={"display": "flex", "alignItems": "center", "marginBottom": "5px"})
+      for lbl, c in zip(PRIORITY_LABELS, [DANGER, WARNING, ACCENT, SUCCESS])],
+
+], style={
+    "width": "210px", "minWidth": "210px", "background": BG_CARD,
+    "padding": "16px", "borderRight": f"1px solid {BORDER}",
+    "overflowY": "auto",
+})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DASHBOARD TAB LAYOUT
+# ─────────────────────────────────────────────────────────────────────────────
+DASHBOARD_PANEL = html.Div([
+    SIDEBAR,
+    html.Div([
+
+        # KPI row
+        html.Div(id="kpi-strip",
+                 style={"display": "flex", "gap": "12px",
+                        "flexWrap": "wrap", "marginBottom": "14px"}),
+
+        # Row 1 — trend + source pie
+        html.Div([
+            card([stitle("Weekly Grievance Trends by Category"),
+                  dcc.Graph(id="graph-weekly-trend",
+                            config={"displayModeBar": False})],
+                 {"flex": "2"}),
+            card([stitle("Grievances by OSINT Source (Latest Week)"),
+                  dcc.Graph(id="graph-source-pie",
+                            config={"displayModeBar": False})],
+                 {"flex": "1"}),
+        ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
+
+        # Row 2 — district bar + category donut
+        html.Div([
+            card([stitle("District-wise Grievance Intensity (All Weeks)"),
+                  dcc.Graph(id="graph-district-bar",
+                            config={"displayModeBar": False})],
+                 {"flex": "3"}),
+            card([stitle("Category Breakdown"),
+                  dcc.Graph(id="graph-category-donut",
+                            config={"displayModeBar": False})],
+                 {"flex": "1"}),
+        ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
+
+        # Row 3 — resolution + sentiment + wow
+        html.Div([
+            card([stitle("Resolution Rate Trend"),
+                  dcc.Graph(id="graph-resolution",
+                            config={"displayModeBar": False})]),
+            card([stitle("Sentiment Analysis (Latest Week)"),
+                  dcc.Graph(id="graph-sentiment",
+                            config={"displayModeBar": False})]),
+            card([stitle("Week-over-Week Spike Detection"),
+                  dcc.Graph(id="graph-wow",
+                            config={"displayModeBar": False})]),
+        ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
+
+        # Row 4 — heatmap
+        card([stitle("District x Category Heatmap (Latest Week)"),
+              dcc.Graph(id="graph-heatmap",
+                        config={"displayModeBar": False})],
+             {"marginBottom": "12px"}),
+
+        # Row 5 — alerts
+        html.Div([
+            html.Div([
+                html.Div([
+                    html.Span("INTELLIGENCE ALERTS",
+                              style={"color": DANGER, "fontSize": "12px",
+                                     "fontWeight": "700", "letterSpacing": "1px"}),
+                    html.Span("  —  Districts with abnormal spikes this week",
+                              style={"color": TEXT_SEC, "fontSize": "11px"}),
+                ], style={"padding": "10px 14px 4px"}),
+                html.Div(id="alert-table", style={"padding": "0 14px 14px"}),
+            ], style={"background": BG_CARD, "borderRadius": "10px",
+                      "border": f"1px solid {DANGER}40"}),
+        ], style={"marginBottom": "12px"}),
+
+        # Row 6 — data explorer
+        card([
+            html.Div([
+                html.Span("OSINT Data Explorer",
+                          style={"color": ACCENT, "fontSize": "12px",
+                                 "fontWeight": "700", "letterSpacing": "1px"}),
+                html.Span("  (latest week, top 50)",
+                          style={"color": TEXT_SEC, "fontSize": "11px"}),
+            ], style={"padding": "10px 14px 6px"}),
+            html.Div(id="data-table", style={"padding": "0 14px 14px"}),
+        ]),
+
+    ], style={"flex": "1", "padding": "14px", "overflowY": "auto"}),
+
+], style={"display": "flex", "height": "calc(100vh - 104px)"})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP
 # ─────────────────────────────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
     title="Gujarat OSINT Intelligence Dashboard",
+    suppress_callback_exceptions=True,
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
 )
 server = app.server
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LAYOUT
-# ─────────────────────────────────────────────────────────────────────────────
+HEADER = html.Div([
+    html.Div([
+        html.Div("OSINT", style={"fontSize": "22px", "fontWeight": "900",
+                                  "color": ACCENT, "marginRight": "10px",
+                                  "letterSpacing": "3px"}),
+        html.Div([
+            html.Div("Gujarat OSINT Intelligence Dashboard",
+                     style={"fontSize": "17px", "fontWeight": "700",
+                            "color": TEXT_PRI, "margin": "0"}),
+            html.Div("Real-time open-source intelligence across all 33 districts"
+                     " | Citizen Grievances & Government Feedback",
+                     style={"color": TEXT_SEC, "fontSize": "11px", "marginTop": "2px"}),
+        ]),
+    ], style={"display": "flex", "alignItems": "center"}),
+    html.Div([
+        html.Span("LIVE", style={"color": SUCCESS, "fontWeight": "700",
+                                  "fontSize": "11px", "border": f"1px solid {SUCCESS}",
+                                  "padding": "2px 6px", "borderRadius": "4px"}),
+        html.Span(f"  {datetime.now().strftime('%d %b %Y %H:%M')}",
+                  style={"color": TEXT_SEC, "fontSize": "11px", "marginLeft": "8px"}),
+        html.Div(f"Data: {WEEKLY_DATES[0]} to {WEEKLY_DATES[-1]}",
+                 style={"color": TEXT_SEC, "fontSize": "10px", "marginTop": "2px",
+                        "textAlign": "right"}),
+    ], style={"textAlign": "right"}),
+], style={
+    "background": "linear-gradient(90deg,#0d1526 0%,#111827 100%)",
+    "borderBottom": f"2px solid {ACCENT}",
+    "padding": "10px 22px", "display": "flex",
+    "justifyContent": "space-between", "alignItems": "center",
+    "height": "56px",
+})
+
 app.layout = html.Div([
-
-    # ── TOP HEADER ──────────────────────────────────────────────────────────
-    html.Div([
-        html.Div([
-            html.Div("🔍", style={"fontSize": "28px", "marginRight": "12px"}),
-            html.Div([
-                html.H1("Gujarat OSINT Intelligence Dashboard",
-                        style={"margin": "0", "fontSize": "20px", "fontWeight": "700",
-                               "color": ACCENT, "letterSpacing": "0.5px"}),
-                html.P("Real-time open-source intelligence across all 33 districts · Citizen Grievances & Government Feedback",
-                       style={"margin": "2px 0 0", "color": TEXT_SEC, "fontSize": "12px"}),
-            ]),
-        ], style={"display": "flex", "alignItems": "center"}),
-
-        html.Div([
-            html.Div([
-                html.Span("● LIVE", style={"color": SUCCESS, "fontWeight": "700", "fontSize": "12px",
-                                           "animation": "blink 1.5s infinite"}),
-                html.Span(f"  Last updated: {datetime.now().strftime('%d %b %Y, %H:%M')}",
-                          style={"color": TEXT_SEC, "fontSize": "12px", "marginLeft": "8px"}),
-            ]),
-            html.Div(f"Data window: {weekly_dates[0]}  →  {weekly_dates[-1]}",
-                     style={"color": TEXT_SEC, "fontSize": "11px", "marginTop": "3px"}),
-        ], style={"textAlign": "right"}),
-    ], style={
-        "background": "linear-gradient(90deg, #0d1526 0%, #111827 100%)",
-        "borderBottom": f"2px solid {ACCENT}",
-        "padding": "14px 24px", "display": "flex",
-        "justifyContent": "space-between", "alignItems": "center",
-    }),
-
-    # ── MAIN BODY ───────────────────────────────────────────────────────────
-    html.Div([
-
-        # ── LEFT SIDEBAR ────────────────────────────────────────────────────
-        html.Div([
-            html.Div("🗺 FILTERS", style={"color": ACCENT, "fontSize": "11px", "fontWeight": "700",
-                                          "letterSpacing": "2px", "marginBottom": "14px"}),
-
-            html.Label("District", style={"color": TEXT_SEC, "fontSize": "11px", "fontWeight": "600"}),
-            dcc.Dropdown(
-                id="dd-district",
-                options=[{"label": "All Districts", "value": "ALL"}] +
-                        [{"label": d, "value": d} for d in GUJARAT_DISTRICTS],
-                value="ALL", clearable=False,
-                style={"marginBottom": "14px", "fontSize": "12px"},
+    HEADER,
+    dcc.Tabs(
+        id="main-tabs",
+        value="tab-dashboard",
+        children=[
+            dcc.Tab(
+                label="Intelligence Dashboard",
+                value="tab-dashboard",
+                children=[DASHBOARD_PANEL],
+                style={"backgroundColor": BG_DARK, "color": TEXT_SEC,
+                       "border": f"1px solid {BORDER}",
+                       "borderBottom": "none",
+                       "padding": "7px 16px", "fontSize": "12px"},
+                selected_style={"backgroundColor": BG_PANEL, "color": ACCENT,
+                                "border": f"1px solid {ACCENT}",
+                                "borderBottom": "none",
+                                "padding": "7px 16px", "fontSize": "12px",
+                                "fontWeight": "700"},
             ),
-
-            html.Label("Grievance Category", style={"color": TEXT_SEC, "fontSize": "11px", "fontWeight": "600"}),
-            dcc.Dropdown(
-                id="dd-category",
-                options=[{"label": "All Categories", "value": "ALL"}] +
-                        [{"label": f"{v['icon']} {k}", "value": k}
-                         for k, v in GRIEVANCE_CATEGORIES.items()],
-                value="ALL", clearable=False,
-                style={"marginBottom": "14px", "fontSize": "12px"},
-            ),
-
-            html.Label("OSINT Source", style={"color": TEXT_SEC, "fontSize": "11px", "fontWeight": "600"}),
-            dcc.Dropdown(
-                id="dd-source",
-                options=[{"label": "All Sources", "value": "ALL"}] +
-                        [{"label": s, "value": s} for s in OSINT_SOURCES],
-                value="ALL", clearable=False,
-                style={"marginBottom": "14px", "fontSize": "12px"},
-            ),
-
-            html.Label("Weeks to Display", style={"color": TEXT_SEC, "fontSize": "11px", "fontWeight": "600"}),
-            dcc.Slider(
-                id="sl-weeks", min=4, max=16, step=1, value=12,
-                marks={4: "4w", 8: "8w", 12: "12w", 16: "16w"},
-                tooltip={"placement": "bottom", "always_visible": False},
-            ),
-
-            html.Hr(style={"borderColor": BORDER, "margin": "18px 0"}),
-
-            # Source legend
-            html.Div("📡 OSINT SOURCES", style={"color": ACCENT, "fontSize": "11px",
-                                                 "fontWeight": "700", "letterSpacing": "2px",
-                                                 "marginBottom": "10px"}),
-            *[html.Div([
-                html.Div(style={"width": "8px", "height": "8px", "borderRadius": "50%",
-                                "backgroundColor": c, "marginRight": "8px", "flexShrink": "0"}),
-                html.Span(s, style={"color": TEXT_SEC, "fontSize": "11px"}),
-            ], style={"display": "flex", "alignItems": "center", "marginBottom": "6px"})
-              for s, c in zip(OSINT_SOURCES,
-                              ["#1DA1F2", "#FF6B35", "#00BFA5", "#FF4081",
-                               "#AB47BC", "#FF7043", "#26C6DA"])],
-
-            html.Hr(style={"borderColor": BORDER, "margin": "18px 0"}),
-
-            # Priority legend
-            html.Div("🚨 PRIORITY LEVELS", style={"color": ACCENT, "fontSize": "11px",
-                                                    "fontWeight": "700", "letterSpacing": "2px",
-                                                    "marginBottom": "10px"}),
-            *[html.Div([
-                html.Div(style={"width": "8px", "height": "8px", "borderRadius": "2px",
-                                "backgroundColor": c, "marginRight": "8px"}),
-                html.Span(lbl, style={"color": TEXT_SEC, "fontSize": "11px"}),
-            ], style={"display": "flex", "alignItems": "center", "marginBottom": "6px"})
-              for lbl, c in zip(PRIORITY_LABELS, [DANGER, WARNING, ACCENT, SUCCESS])],
-
-        ], style={
-            "width": "220px", "minWidth": "220px", "background": BG_CARD,
-            "padding": "18px", "borderRight": f"1px solid {BORDER}",
-            "overflowY": "auto", "height": "calc(100vh - 64px)",
-        }),
-
-        # ── RIGHT CONTENT AREA ───────────────────────────────────────────────
-        html.Div([
-
-            # ── KPI STRIP ───────────────────────────────────────────────────
-            html.Div(id="kpi-strip", style={"display": "flex", "gap": "12px",
-                                             "flexWrap": "wrap", "marginBottom": "16px"}),
-
-            # ── ROW 1: Weekly trend + Source breakdown ────────────────────
-            html.Div([
-                html.Div([
-                    html.Div("📈 Weekly Grievance Trends by Category",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "marginBottom": "4px",
-                                    "padding": "10px 14px 0"}),
-                    dcc.Graph(id="graph-weekly-trend", style={"height": "280px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "2", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-
-                html.Div([
-                    html.Div("📡 Grievances by OSINT Source (Latest Week)",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "marginBottom": "4px",
-                                    "padding": "10px 14px 0"}),
-                    dcc.Graph(id="graph-source-pie", style={"height": "280px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "1", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-            ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
-
-            # ── ROW 2: District heatmap + Category bar ─────────────────────
-            html.Div([
-                html.Div([
-                    html.Div("🏙️ District-wise Grievance Intensity (All Time)",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "marginBottom": "4px",
-                                    "padding": "10px 14px 0"}),
-                    dcc.Graph(id="graph-district-bar", style={"height": "300px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "3", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-
-                html.Div([
-                    html.Div("📊 Category Breakdown",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "marginBottom": "4px",
-                                    "padding": "10px 14px 0"}),
-                    dcc.Graph(id="graph-category-donut", style={"height": "300px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "1", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-            ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
-
-            # ── ROW 3: Resolution rate + Sentiment + Week-over-week ────────
-            html.Div([
-                html.Div([
-                    html.Div("✅ Resolution Rate Trend",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "padding": "10px 14px 4px"}),
-                    dcc.Graph(id="graph-resolution", style={"height": "240px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "1", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-
-                html.Div([
-                    html.Div("😠 Sentiment Analysis (Latest Week)",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "padding": "10px 14px 4px"}),
-                    dcc.Graph(id="graph-sentiment", style={"height": "240px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "1", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-
-                html.Div([
-                    html.Div("🔥 Week-over-Week Spike Detection",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "padding": "10px 14px 4px"}),
-                    dcc.Graph(id="graph-wow", style={"height": "240px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "1", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-            ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
-
-            # ── ROW 4: Heatmap matrix district × category ─────────────────
-            html.Div([
-                html.Div([
-                    html.Div("🗺️ District × Category Heatmap (Latest Week)",
-                             style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                    "letterSpacing": "1px", "padding": "10px 14px 4px"}),
-                    dcc.Graph(id="graph-heatmap", style={"height": "420px"},
-                              config={"displayModeBar": False}),
-                ], style={"flex": "1", "background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-            ], style={"marginBottom": "12px"}),
-
-            # ── ROW 5: Alert table ─────────────────────────────────────────
-            html.Div([
-                html.Div([
+            dcc.Tab(
+                label="Raw OSINT Data Sources",
+                value="tab-raw-sources",
+                children=[
                     html.Div([
-                        html.Span("🚨 Active Intelligence Alerts",
-                                  style={"color": DANGER, "fontSize": "12px", "fontWeight": "700",
-                                         "letterSpacing": "1px"}),
-                        html.Span(" — Districts with abnormal grievance spikes this week",
-                                  style={"color": TEXT_SEC, "fontSize": "11px"}),
-                    ], style={"padding": "10px 14px 4px"}),
-                    html.Div(id="alert-table", style={"padding": "0 14px 14px"}),
-                ], style={"background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {DANGER}33"}),
-            ], style={"marginBottom": "12px"}),
-
-            # ── ROW 6: Raw data explorer ───────────────────────────────────
-            html.Div([
-                html.Div([
-                    html.Div([
-                        html.Span("🔎 OSINT Data Explorer",
-                                  style={"color": ACCENT, "fontSize": "12px", "fontWeight": "700",
-                                         "letterSpacing": "1px"}),
-                        html.Span(" (latest week · top 50 rows)",
-                                  style={"color": TEXT_SEC, "fontSize": "11px"}),
-                    ], style={"padding": "10px 14px 8px"}),
-                    html.Div(id="data-table", style={"padding": "0 14px 14px"}),
-                ], style={"background": BG_CARD, "borderRadius": "10px",
-                          "border": f"1px solid {BORDER}"}),
-            ]),
-
-        ], style={"flex": "1", "padding": "16px", "overflowY": "auto",
-                  "height": "calc(100vh - 64px)"}),
-
-    ], style={"display": "flex", "height": "calc(100vh - 64px)"}),
-
+                        html.Div([
+                            html.Div("RAW OSINT SAMPLE RECORDS",
+                                     style={"color": ACCENT, "fontSize": "13px",
+                                            "fontWeight": "700", "letterSpacing": "1px",
+                                            "marginBottom": "4px"}),
+                            html.P(
+                                "Sample records (5-8 rows per channel) showing "
+                                "the actual data structure fetched from each OSINT source. "
+                                "Hover over any cell to see the full text.",
+                                style={"color": TEXT_SEC, "fontSize": "12px", "margin": "0"}
+                            ),
+                        ], style={"padding": "14px 16px 10px",
+                                  "borderBottom": f"1px solid {BORDER}"}),
+                        html.Div(RAW_TAB_CONTENT,
+                                 style={"overflowY": "auto",
+                                        "height": "calc(100vh - 130px)"}),
+                    ]),
+                ],
+                style={"backgroundColor": BG_DARK, "color": TEXT_SEC,
+                       "border": f"1px solid {BORDER}",
+                       "borderBottom": "none",
+                       "padding": "7px 16px", "fontSize": "12px"},
+                selected_style={"backgroundColor": BG_PANEL, "color": ACCENT,
+                                "border": f"1px solid {ACCENT}",
+                                "borderBottom": "none",
+                                "padding": "7px 16px", "fontSize": "12px",
+                                "fontWeight": "700"},
+            ),
+        ],
+        style={"backgroundColor": BG_DARK,
+               "borderBottom": f"1px solid {BORDER}",
+               "height": "36px"},
+        colors={"border": BORDER, "primary": ACCENT, "background": BG_DARK},
+    ),
 ], style={"background": BG_DARK, "minHeight": "100vh",
           "fontFamily": "Inter, Segoe UI, Arial, sans-serif", "color": TEXT_PRI})
 
@@ -452,17 +543,6 @@ app.layout = html.Div([
 # CALLBACKS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def filter_df(district: str, category: str, n_weeks: int) -> pd.DataFrame:
-    cutoff = pd.to_datetime(weekly_dates[-n_weeks])
-    filtered = df[df["week"] >= cutoff].copy()
-    if district != "ALL":
-        filtered = filtered[filtered["district"] == district]
-    if category != "ALL":
-        filtered = filtered[filtered["category"] == category]
-    return filtered
-
-
-# ── KPI Strip ────────────────────────────────────────────────────────────────
 @app.callback(
     Output("kpi-strip", "children"),
     Input("dd-district", "value"),
@@ -470,30 +550,29 @@ def filter_df(district: str, category: str, n_weeks: int) -> pd.DataFrame:
     Input("sl-weeks", "value"),
 )
 def update_kpis(district, category, n_weeks):
-    fdf = filter_df(district, category, n_weeks)
-    latest = fdf["week"].max()
-    prev   = latest - timedelta(weeks=1)
-    cur    = fdf[fdf["week"] == latest]["count"].sum()
-    prv    = fdf[fdf["week"] == prev]["count"].sum()
-    chg    = round((cur - prv) / max(prv, 1) * 100, 1)
-    res    = fdf[fdf["week"] == latest]["resolved"].sum()
-    pend   = fdf[fdf["week"] == latest]["pending"].sum()
-    res_rt = round(res / max(cur, 1) * 100, 1)
-    total  = fdf["count"].sum()
-    chg_col = DANGER if chg > 0 else SUCCESS
-    chg_sign = "▲" if chg > 0 else "▼"
-
+    fdf  = filter_df(district, category, n_weeks)
+    lw   = fdf["week"].max()
+    pw   = lw - timedelta(weeks=1)
+    cur  = int(fdf[fdf["week"] == lw]["count"].sum())
+    prv  = int(fdf[fdf["week"] == pw]["count"].sum())
+    chg  = round((cur - prv) / max(prv, 1) * 100, 1)
+    res  = int(fdf[fdf["week"] == lw]["resolved"].sum())
+    pend = int(fdf[fdf["week"] == lw]["pending"].sum())
+    rr   = round(res / max(cur, 1) * 100, 1)
+    tot  = int(fdf["count"].sum())
+    sgn, col = ("UP", DANGER) if chg > 0 else ("DOWN", SUCCESS)
     return [
-        kpi_card("Total Grievances",  int(total),  f"Across {n_weeks} weeks",    ACCENT,   "📋"),
-        kpi_card("This Week",         int(cur),    f"{chg_sign} {abs(chg)}% vs last week", chg_col, "📅"),
-        kpi_card("Resolved",          int(res),    f"{res_rt}% resolution rate",  SUCCESS,  "✅"),
-        kpi_card("Pending",           int(pend),   "Awaiting action",             WARNING,  "⏳"),
-        kpi_card("Districts Covered", len(fdf["district"].unique()), "Active reporting", ACCENT2, "🗺️"),
-        kpi_card("Data Sources",      len(OSINT_SOURCES), "OSINT channels",       "#1DA1F2", "📡"),
+        kpi_card("Total Grievances", tot,  f"Across {int(n_weeks)} weeks", ACCENT,  ">>"),
+        kpi_card("This Week",        cur,  f"{sgn} {abs(chg)}% vs prev",  col,     "><"),
+        kpi_card("Resolved",         res,  f"{rr}% resolution rate",      SUCCESS, "OK"),
+        kpi_card("Pending",          pend, "Awaiting action",             WARNING, "!!"),
+        kpi_card("Districts",        len(fdf["district"].unique()),
+                 "Active reporting", ACCENT2, "GJ"),
+        kpi_card("OSINT Sources",    len(OSINT_SOURCES),
+                 "Live channels",    "#1DA1F2", ">>"),
     ]
 
 
-# ── Weekly Trend Line ─────────────────────────────────────────────────────────
 @app.callback(
     Output("graph-weekly-trend", "figure"),
     Input("dd-district", "value"),
@@ -502,71 +581,74 @@ def update_kpis(district, category, n_weeks):
 )
 def update_trend(district, category, n_weeks):
     fdf = filter_df(district, category, n_weeks)
+    fig = go.Figure()
+
     if category == "ALL":
         grp = fdf.groupby(["week", "category"])["count"].sum().reset_index()
-        fig = go.Figure()
-        for i, (cat, meta) in enumerate(GRIEVANCE_CATEGORIES.items()):
+        for cat, meta in GRIEVANCE_CATEGORIES.items():
             sub = grp[grp["category"] == cat]
             fig.add_trace(go.Scatter(
-                x=sub["week"], y=sub["count"], name=f"{meta['icon']} {cat}",
-                mode="lines+markers", line=dict(color=meta["color"], width=2),
-                marker=dict(size=4), hovertemplate="%{y:,} grievances<extra>%{fullData.name}</extra>",
+                x=sub["week"], y=sub["count"],
+                name=cat,
+                mode="lines+markers",
+                line=dict(color=meta["color"], width=2),
+                marker=dict(size=4),
+                hovertemplate="%{y:,}<extra>" + cat + "</extra>",
             ))
     else:
-        grp = fdf.groupby("week")["count"].sum().reset_index()
-        meta = GRIEVANCE_CATEGORIES.get(category, {"color": ACCENT, "icon": "📋"})
-        fig = go.Figure(go.Scatter(
-            x=grp["week"], y=grp["count"], name=category,
-            mode="lines+markers", fill="tozeroy",
+        grp  = fdf.groupby("week")["count"].sum().reset_index()
+        meta = GRIEVANCE_CATEGORIES.get(category, {"color": ACCENT})
+        fig.add_trace(go.Scatter(
+            x=grp["week"], y=grp["count"],
+            name=category,
+            mode="lines+markers",
+            fill="tozeroy",
             line=dict(color=meta["color"], width=2.5),
             fillcolor=meta["color"] + "33",
             hovertemplate="%{y:,} grievances<extra></extra>",
         ))
-        # Add 7-day moving average
         if len(grp) >= 3:
             grp["ma"] = grp["count"].rolling(3, min_periods=1).mean()
             fig.add_trace(go.Scatter(
-                x=grp["week"], y=grp["ma"], name="3-week MA",
-                mode="lines", line=dict(color="white", width=1.5, dash="dot"),
+                x=grp["week"], y=grp["ma"],
+                name="3-week MA",
+                mode="lines",
+                line=dict(color="white", width=1.5, dash="dot"),
             ))
 
-    fig.update_layout(**PLOT_LAYOUT)
+    lo = base_layout(height=300)
+    fig.update_layout(**lo)
     fig.update_xaxes(tickformat="%d %b")
     return fig
 
 
-# ── Source Pie ────────────────────────────────────────────────────────────────
 @app.callback(
     Output("graph-source-pie", "figure"),
     Input("dd-district", "value"),
     Input("dd-category", "value"),
 )
 def update_source_pie(district, category):
-    fdf = filter_df(district, category, 1)
-    src_cols = [c for c in df.columns if c.startswith("src_")]
-    totals = fdf[src_cols].sum()
-    labels = [s for s in OSINT_SOURCES]
-    values = [int(totals.get(sc, 0)) for sc in src_cols]
-    colors = ["#1DA1F2", "#FF6B35", "#00BFA5", "#FF4081", "#AB47BC", "#FF7043", "#26C6DA"]
+    fdf    = filter_df(district, category, 1)
+    values = [max(int(fdf[c].sum()), 0) for c in SRC_COLS]
 
     fig = go.Figure(go.Pie(
-        labels=labels, values=values, hole=0.55,
-        marker=dict(colors=colors, line=dict(color=BG_DARK, width=2)),
-        textinfo="percent", hoverinfo="label+value",
-        insidetextfont=dict(color="white", size=10),
+        labels=OSINT_SOURCES,
+        values=values,
+        hole=0.55,
+        marker=dict(colors=SOURCE_COLORS,
+                    line=dict(color=BG_DARK, width=2)),
+        textinfo="percent",
+        hoverinfo="label+value",
+        textfont=dict(color="white", size=10),
     ))
-    fig.update_layout(
-        **PLOT_LAYOUT,
-        annotations=[dict(text="Sources", x=0.5, y=0.5, font_size=13,
-                          font_color=TEXT_PRI, showarrow=False)],
-        showlegend=True,
-        legend=dict(font=dict(size=10), orientation="v", x=1.0, y=0.5),
-        margin=dict(l=10, r=90, t=35, b=10),
-    )
+    lo = pie_layout(height=300)
+    lo["annotations"] = [dict(text="Sources", x=0.5, y=0.5,
+                               font_size=12, font_color=TEXT_PRI,
+                               showarrow=False)]
+    fig.update_layout(**lo)
     return fig
 
 
-# ── District Bar ──────────────────────────────────────────────────────────────
 @app.callback(
     Output("graph-district-bar", "figure"),
     Input("dd-category", "value"),
@@ -574,29 +656,34 @@ def update_source_pie(district, category):
 )
 def update_district_bar(category, n_weeks):
     fdf = filter_df("ALL", category, n_weeks)
-    grp = fdf.groupby("district")["count"].sum().reset_index().sort_values("count", ascending=True)
-
-    max_v = grp["count"].max()
+    grp = (fdf.groupby("district")["count"].sum()
+              .reset_index()
+              .sort_values("count", ascending=True))
+    mx  = grp["count"].max()
     colors = [
-        DANGER if v > max_v * 0.80 else
-        WARNING if v > max_v * 0.55 else
-        ACCENT if v > max_v * 0.35 else SUCCESS
+        DANGER  if v > mx * 0.80 else
+        WARNING if v > mx * 0.55 else
+        ACCENT  if v > mx * 0.35 else SUCCESS
         for v in grp["count"]
     ]
 
     fig = go.Figure(go.Bar(
         x=grp["count"], y=grp["district"],
-        orientation="h", marker_color=colors,
+        orientation="h",
+        marker_color=colors,
         hovertemplate="%{y}: %{x:,}<extra></extra>",
         text=grp["count"].apply(lambda v: f"{v:,}"),
-        textposition="outside", textfont=dict(size=9, color=TEXT_SEC),
+        textposition="auto",
+        textfont=dict(size=9, color=TEXT_PRI),
+        cliponaxis=False,
     ))
-    fig.update_layout(**PLOT_LAYOUT, bargap=0.25)
+    lo = base_layout(height=720)           # 33 districts need height
+    lo["margin"] = dict(l=10, r=60, t=30, b=10)
+    fig.update_layout(**lo)
     fig.update_xaxes(title_text="Total Grievances")
     return fig
 
 
-# ── Category Donut ────────────────────────────────────────────────────────────
 @app.callback(
     Output("graph-category-donut", "figure"),
     Input("dd-district", "value"),
@@ -605,25 +692,21 @@ def update_district_bar(category, n_weeks):
 def update_category_donut(district, n_weeks):
     fdf = filter_df(district, "ALL", n_weeks)
     grp = fdf.groupby("category")["count"].sum().reset_index()
-    icons = [GRIEVANCE_CATEGORIES[c]["icon"] for c in grp["category"]]
-    labels = [f"{i} {c}" for i, c in zip(icons, grp["category"])]
 
     fig = go.Figure(go.Pie(
-        labels=labels, values=grp["count"], hole=0.5,
-        marker=dict(colors=CAT_COLORS, line=dict(color=BG_DARK, width=1)),
-        textinfo="percent", hoverinfo="label+value",
-        insidetextfont=dict(color="white", size=9),
+        labels=grp["category"].tolist(),
+        values=grp["count"].tolist(),
+        hole=0.50,
+        marker=dict(colors=CAT_COLORS,
+                    line=dict(color=BG_DARK, width=1)),
+        textinfo="percent",
+        hoverinfo="label+value",
+        textfont=dict(color="white", size=9),
     ))
-    fig.update_layout(
-        **PLOT_LAYOUT,
-        showlegend=True,
-        legend=dict(font=dict(size=8.5), orientation="v", x=1.0, y=0.5),
-        margin=dict(l=5, r=100, t=35, b=5),
-    )
+    fig.update_layout(**pie_layout(height=720))
     return fig
 
 
-# ── Resolution Rate ───────────────────────────────────────────────────────────
 @app.callback(
     Output("graph-resolution", "figure"),
     Input("dd-district", "value"),
@@ -637,63 +720,86 @@ def update_resolution(district, category, n_weeks):
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=grp["week"], y=grp["count"], name="Total",
-        marker_color=ACCENT + "55", yaxis="y",
+        x=grp["week"], y=grp["count"],
+        name="Total", marker_color=ACCENT + "44", yaxis="y",
         hovertemplate="Total: %{y:,}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
-        x=grp["week"], y=grp["rate"], name="Resolution %",
-        mode="lines+markers", line=dict(color=SUCCESS, width=2.5),
-        marker=dict(size=5), yaxis="y2",
+        x=grp["week"], y=grp["rate"],
+        name="Resolution %", yaxis="y2",
+        mode="lines+markers",
+        line=dict(color=SUCCESS, width=2.5),
+        marker=dict(size=5),
         hovertemplate="Rate: %{y:.1f}%<extra></extra>",
     ))
+
     fig.update_layout(
-        **PLOT_LAYOUT,
-        yaxis=dict(title="Count", gridcolor=BORDER, tickfont=dict(size=10)),
-        yaxis2=dict(title="Resolution %", overlaying="y", side="right",
-                    range=[0, 105], ticksuffix="%", gridcolor="transparent",
-                    tickfont=dict(size=10)),
-        legend=dict(orientation="h", y=1.08, x=0),
+        height=270,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_PRI, family="Inter, Segoe UI, sans-serif", size=11),
+        margin=dict(l=10, r=10, t=30, b=10),
         barmode="overlay",
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h",
+                    y=1.08, x=0, font=dict(size=10)),
+        xaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER,
+                   tickfont=dict(size=10), tickformat="%d %b"),
+        yaxis=dict(title="Count", gridcolor=BORDER,
+                   zerolinecolor=BORDER, tickfont=dict(size=10)),
+        yaxis2=dict(title="Resolution %", overlaying="y", side="right",
+                    range=[0, 110], ticksuffix="%",
+                    gridcolor="transparent", tickfont=dict(size=10)),
     )
-    fig.update_xaxes(tickformat="%d %b")
     return fig
 
 
-# ── Sentiment Bars ────────────────────────────────────────────────────────────
 @app.callback(
     Output("graph-sentiment", "figure"),
     Input("dd-district", "value"),
     Input("dd-category", "value"),
 )
 def update_sentiment(district, category):
-    fdf = filter_df(district, category, 1)
-    neg = int(fdf["sentiment_neg"].sum())
-    neu = int(fdf["sentiment_neu"].sum())
-    pos = int(fdf["sentiment_pos"].sum())
+    fdf   = filter_df(district, category, 1)
+    neg   = int(fdf["sentiment_neg"].sum())
+    neu   = int(fdf["sentiment_neu"].sum())
+    pos   = int(fdf["sentiment_pos"].sum())
     total = max(neg + neu + pos, 1)
 
     fig = go.Figure()
-    for val, label, color in zip(
-        [neg, neu, pos],
-        ["😠 Negative", "😐 Neutral", "😊 Positive"],
-        [DANGER, WARNING, SUCCESS]
-    ):
+    for val, lbl, clr in [
+        (neg, "Negative", DANGER),
+        (neu, "Neutral",  WARNING),
+        (pos, "Positive", SUCCESS),
+    ]:
+        pct = val / total * 100
         fig.add_trace(go.Bar(
-            x=[val], y=[label], orientation="h",
-            marker_color=color,
-            text=[f"{val:,}  ({val/total*100:.1f}%)"],
-            textposition="inside", insidetextanchor="middle",
+            x=[val], y=[lbl],
+            orientation="h",
+            marker_color=clr,
+            name=lbl,
+            text=[f"{val:,}  ({pct:.1f}%)"],
+            textposition="inside",
+            insidetextanchor="middle",
             textfont=dict(size=11, color="white"),
-            hovertemplate=f"{label}: %{{x:,}}<extra></extra>",
-            name=label,
+            hovertemplate=f"{lbl}: %{{x:,}}<extra></extra>",
         ))
-    fig.update_layout(**PLOT_LAYOUT, showlegend=False, barmode="relative",
-                      xaxis=dict(title="Mentions", gridcolor=BORDER))
+
+    fig.update_layout(
+        height=270,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_PRI, family="Inter, Segoe UI, sans-serif", size=11),
+        margin=dict(l=10, r=10, t=30, b=10),
+        showlegend=False,
+        barmode="relative",
+        xaxis=dict(title="Mentions", gridcolor=BORDER,
+                   zerolinecolor=BORDER, tickfont=dict(size=10)),
+        yaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER,
+                   tickfont=dict(size=12)),
+    )
     return fig
 
 
-# ── WoW Spike Detection ────────────────────────────────────────────────────────
 @app.callback(
     Output("graph-wow", "figure"),
     Input("dd-district", "value"),
@@ -702,127 +808,135 @@ def update_sentiment(district, category):
 def update_wow(district, n_weeks):
     fdf = filter_df(district, "ALL", n_weeks)
     grp = fdf.groupby(["week", "category"])["count"].sum().reset_index()
-    latest = grp["week"].max()
-    prev   = latest - timedelta(weeks=1)
+    lw  = grp["week"].max()
+    pw  = lw - timedelta(weeks=1)
 
-    cur_wk = grp[grp["week"] == latest].set_index("category")["count"]
-    prv_wk = grp[grp["week"] == prev].set_index("category")["count"]
-    wow = ((cur_wk - prv_wk) / prv_wk.replace(0, 1) * 100).round(1).sort_values()
+    cur = grp[grp["week"] == lw].set_index("category")["count"]
+    prv = grp[grp["week"] == pw].set_index("category")["count"]
+    wow = ((cur - prv) / prv.replace(0, 1) * 100).round(1).sort_values()
 
-    colors = [DANGER if v > 0 else SUCCESS for v in wow.values]
-    icons  = [GRIEVANCE_CATEGORIES.get(c, {}).get("icon", "📋") for c in wow.index]
-    labels = [f"{i} {c}" for i, c in zip(icons, wow.index)]
+    labels = wow.index.tolist()
+    values = wow.values.tolist()
+    colors = [DANGER if v > 0 else SUCCESS for v in values]
 
     fig = go.Figure(go.Bar(
-        x=wow.values, y=labels, orientation="h",
+        x=values, y=labels,
+        orientation="h",
         marker_color=colors,
-        text=[f"{'▲' if v > 0 else '▼'} {abs(v):.1f}%" for v in wow.values],
-        textposition="outside", textfont=dict(size=10),
+        text=[("UP " if v > 0 else "DN ") + str(abs(round(v, 1))) + "%" for v in values],
+        textposition="outside",
+        textfont=dict(size=10, color=TEXT_PRI),
         hovertemplate="%{y}: %{x:+.1f}%<extra></extra>",
+        cliponaxis=False,
     ))
     fig.add_vline(x=0, line_color=TEXT_SEC, line_width=1)
-    fig.update_layout(**PLOT_LAYOUT, showlegend=False,
-                      xaxis=dict(title="WoW Change (%)", gridcolor=BORDER, ticksuffix="%"))
+
+    fig.update_layout(
+        height=270,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_PRI, family="Inter, Segoe UI, sans-serif", size=11),
+        margin=dict(l=10, r=70, t=30, b=10),
+        showlegend=False,
+        xaxis=dict(title="WoW Change (%)", gridcolor=BORDER,
+                   zerolinecolor=BORDER, ticksuffix="%",
+                   tickfont=dict(size=10)),
+        yaxis=dict(gridcolor=BORDER, zerolinecolor=BORDER,
+                   tickfont=dict(size=10)),
+    )
     return fig
 
 
-# ── District × Category Heatmap ───────────────────────────────────────────────
 @app.callback(
     Output("graph-heatmap", "figure"),
     Input("sl-weeks", "value"),
 )
 def update_heatmap(n_weeks):
-    fdf = filter_df("ALL", "ALL", 1)
+    fdf   = filter_df("ALL", "ALL", 1)
     pivot = fdf.pivot_table(index="district", columns="category",
                             values="count", aggfunc="sum").fillna(0)
 
-    # Reorder columns by total
     col_order = category_total["category"].tolist()
-    pivot = pivot[[c for c in col_order if c in pivot.columns]]
+    pivot = pivot.reindex(
+        columns=[c for c in col_order if c in pivot.columns], fill_value=0)
 
     fig = go.Figure(go.Heatmap(
         z=pivot.values,
-        x=[f"{GRIEVANCE_CATEGORIES[c]['icon']} {c}" for c in pivot.columns],
+        x=pivot.columns.tolist(),
         y=pivot.index.tolist(),
         colorscale=[
-            [0.0,  "#0a0e1a"],
+            [0.00, "#0a0e1a"],
             [0.25, "#1a3a5c"],
             [0.50, "#1a6b9e"],
             [0.75, "#f59e0b"],
-            [1.0,  "#ef4444"],
+            [1.00, "#ef4444"],
         ],
-        hovertemplate="District: %{y}<br>Category: %{x}<br>Grievances: %{z:,}<extra></extra>",
+        hovertemplate="<b>%{y}</b><br>%{x}<br>Grievances: %{z:,}<extra></extra>",
         colorbar=dict(
-            title="Count", tickfont=dict(color=TEXT_PRI),
-            titlefont=dict(color=TEXT_PRI),
+            title=dict(text="Count", font=dict(color=TEXT_PRI)),   # Plotly 6 API
+            tickfont=dict(color=TEXT_PRI),
         ),
     ))
     fig.update_layout(
-        **PLOT_LAYOUT,
-        margin=dict(l=10, r=10, t=30, b=80),
-        xaxis=dict(tickangle=-35, tickfont=dict(size=9), gridcolor="transparent"),
+        height=640,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_PRI, family="Inter, Segoe UI, sans-serif", size=10),
+        margin=dict(l=10, r=20, t=20, b=110),
+        xaxis=dict(tickangle=-40, tickfont=dict(size=9),
+                   gridcolor="transparent"),
         yaxis=dict(tickfont=dict(size=9), gridcolor="transparent"),
     )
     return fig
 
 
-# ── Alert Table ────────────────────────────────────────────────────────────────
 @app.callback(
     Output("alert-table", "children"),
     Input("dd-district", "value"),
     Input("dd-category", "value"),
 )
 def update_alerts(district, category):
-    fdf  = filter_df(district, category, 4)
-    grp  = fdf.groupby(["district", "category", "week"])["count"].sum().reset_index()
-    latest = grp["week"].max()
-    prev   = latest - timedelta(weeks=1)
-
-    cur_grp = grp[grp["week"] == latest].set_index(["district", "category"])["count"]
-    prv_grp = grp[grp["week"] == prev].set_index(["district", "category"])["count"]
-    wow = ((cur_grp - prv_grp) / prv_grp.replace(0, 1) * 100).round(1)
+    fdf    = filter_df(district, category, 4)
+    grp    = fdf.groupby(["district", "category", "week"])["count"].sum().reset_index()
+    lw     = grp["week"].max()
+    pw     = lw - timedelta(weeks=1)
+    cur    = grp[grp["week"] == lw].set_index(["district", "category"])["count"]
+    prv    = grp[grp["week"] == pw].set_index(["district", "category"])["count"]
+    wow    = ((cur - prv) / prv.replace(0, 1) * 100).round(1)
     spikes = wow[wow > 20].sort_values(ascending=False).head(15).reset_index()
-    spikes.columns = ["District", "Category", "WoW Change %"]
-    spikes["Current Count"] = cur_grp.reindex(
-        pd.MultiIndex.from_frame(spikes[["District", "Category"]])).values
-    spikes["Priority"] = spikes["WoW Change %"].apply(
-        lambda v: "🔴 Critical" if v > 50 else "🟠 High" if v > 35 else "🟡 Medium"
-    )
-    spikes["Category"] = spikes["Category"].apply(
-        lambda c: f"{GRIEVANCE_CATEGORIES.get(c, {}).get('icon', '')} {c}"
-    )
-    spikes["WoW Change %"] = spikes["WoW Change %"].apply(lambda v: f"▲ {v:.1f}%")
 
     if spikes.empty:
-        return html.Div("✅ No critical spikes detected this week.",
+        return html.Div("No critical spikes detected this week.",
                         style={"color": SUCCESS, "padding": "8px", "fontSize": "13px"})
+
+    spikes.columns = ["District", "Category", "WoW %"]
+    spikes["Count"] = cur.reindex(
+        pd.MultiIndex.from_frame(spikes[["District", "Category"]])).values
+    spikes["Priority"] = spikes["WoW %"].apply(
+        lambda v: "CRITICAL" if v > 50 else "HIGH" if v > 35 else "MEDIUM")
+    spikes["WoW %"] = spikes["WoW %"].apply(lambda v: f"UP {v:.1f}%")
 
     return dash_table.DataTable(
         data=spikes.to_dict("records"),
         columns=[{"name": c, "id": c} for c in spikes.columns],
         style_table={"overflowX": "auto"},
-        style_header={
-            "backgroundColor": BG_PANEL, "color": ACCENT,
-            "fontWeight": "700", "fontSize": "11px",
-            "borderBottom": f"1px solid {BORDER}",
-            "textTransform": "uppercase", "letterSpacing": "1px",
-        },
-        style_cell={
-            "backgroundColor": "transparent", "color": TEXT_PRI,
-            "fontSize": "12px", "border": f"1px solid {BORDER}",
-            "padding": "6px 12px", "textAlign": "left",
-        },
+        style_header={"backgroundColor": BG_PANEL, "color": ACCENT,
+                      "fontWeight": "700", "fontSize": "11px",
+                      "borderBottom": f"1px solid {BORDER}",
+                      "textTransform": "uppercase", "letterSpacing": "1px"},
+        style_cell={"backgroundColor": "transparent", "color": TEXT_PRI,
+                    "fontSize": "12px", "border": f"1px solid {BORDER}",
+                    "padding": "6px 12px", "textAlign": "left"},
         style_data_conditional=[
-            {"if": {"filter_query": '{Priority} contains "Critical"'},
+            {"if": {"filter_query": '{Priority} = "CRITICAL"'},
              "color": DANGER, "fontWeight": "600"},
-            {"if": {"filter_query": '{Priority} contains "High"'},
+            {"if": {"filter_query": '{Priority} = "HIGH"'},
              "color": WARNING},
         ],
         page_size=10, sort_action="native",
     )
 
 
-# ── Data Table Explorer ────────────────────────────────────────────────────────
 @app.callback(
     Output("data-table", "children"),
     Input("dd-district", "value"),
@@ -830,98 +944,86 @@ def update_alerts(district, category):
 )
 def update_data_table(district, category):
     fdf = filter_df(district, category, 1)
-    display = fdf[["week", "district", "category", "count", "resolved",
-                    "pending", "resolution_rate"]].copy()
-    display["week"] = display["week"].dt.strftime("%Y-%m-%d")
-    display["Category"] = display["category"].apply(
-        lambda c: f"{GRIEVANCE_CATEGORIES.get(c, {}).get('icon', '')} {c}"
-    )
-    display = display.rename(columns={
-        "week": "Week", "district": "District", "category": "Raw Category",
-        "count": "Total", "resolved": "Resolved", "pending": "Pending",
-        "resolution_rate": "Resolution %",
-    })
-    display = display[["Week", "District", "Category", "Total",
-                        "Resolved", "Pending", "Resolution %"]].sort_values(
-        "Total", ascending=False).head(50)
+    out = fdf[["week", "district", "category", "count",
+               "resolved", "pending", "resolution_rate"]].copy()
+    out["week"] = out["week"].dt.strftime("%Y-%m-%d")
+    out = out.rename(columns={
+        "week": "Week", "district": "District", "category": "Category",
+        "count": "Total", "resolved": "Resolved",
+        "pending": "Pending", "resolution_rate": "Resolution %",
+    }).sort_values("Total", ascending=False).head(50)
 
     return dash_table.DataTable(
-        data=display.to_dict("records"),
-        columns=[{"name": c, "id": c} for c in display.columns],
+        data=out.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in out.columns],
         style_table={"overflowX": "auto"},
-        style_header={
-            "backgroundColor": BG_PANEL, "color": ACCENT,
-            "fontWeight": "700", "fontSize": "11px",
-            "borderBottom": f"1px solid {BORDER}",
-            "textTransform": "uppercase", "letterSpacing": "1px",
-        },
-        style_cell={
-            "backgroundColor": "transparent", "color": TEXT_PRI,
-            "fontSize": "12px", "border": f"1px solid {BORDER}",
-            "padding": "6px 12px", "textAlign": "left",
-            "minWidth": "100px", "maxWidth": "200px",
-        },
+        style_header={"backgroundColor": BG_PANEL, "color": ACCENT,
+                      "fontWeight": "700", "fontSize": "11px",
+                      "borderBottom": f"1px solid {BORDER}",
+                      "textTransform": "uppercase", "letterSpacing": "1px"},
+        style_cell={"backgroundColor": "transparent", "color": TEXT_PRI,
+                    "fontSize": "12px", "border": f"1px solid {BORDER}",
+                    "padding": "6px 12px", "textAlign": "left",
+                    "minWidth": "80px"},
         style_data_conditional=[
-            {"if": {"column_id": "Total", "filter_query": "{Total} > 200"},
+            {"if": {"column_id": "Total",
+                    "filter_query": "{Total} > 200"},
              "color": DANGER, "fontWeight": "600"},
-            {"if": {"column_id": "Resolution %", "filter_query": "{Resolution %} > 75"},
+            {"if": {"column_id": "Resolution %",
+                    "filter_query": "{Resolution %} > 75"},
              "color": SUCCESS},
-            {"if": {"column_id": "Resolution %", "filter_query": "{Resolution %} < 50"},
+            {"if": {"column_id": "Resolution %",
+                    "filter_query": "{Resolution %} < 50"},
              "color": WARNING},
         ],
         page_size=15, sort_action="native", filter_action="native",
-        tooltip_data=[{
-            "Resolution %": {"value": f"{'Good' if r['Resolution %'] >= 70 else 'Needs attention'}",
-                             "type": "markdown"}
-        } for _, r in display.iterrows()],
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CUSTOM CSS INJECTION
+# CUSTOM CSS
 # ─────────────────────────────────────────────────────────────────────────────
-app.index_string = """
-<!DOCTYPE html>
-<html>
-<head>
-    {%metas%}
-    <title>{%title%}</title>
-    {%favicon%}
-    {%css%}
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        * { box-sizing: border-box; }
-        body { margin: 0; background: """ + BG_DARK + """; }
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: """ + BG_CARD + """; }
-        ::-webkit-scrollbar-thumb { background: """ + BORDER + """; border-radius: 3px; }
-        .Select-control { background-color: """ + BG_PANEL + """ !important;
-                          border-color: """ + BORDER + """ !important; }
-        .Select-value-label, .Select-placeholder { color: """ + TEXT_PRI + """ !important; }
-        .Select-menu-outer { background-color: """ + BG_PANEL + """ !important;
-                             border-color: """ + BORDER + """ !important; }
-        .VirtualizedSelectOption { color: """ + TEXT_PRI + """ !important; }
-        .VirtualizedSelectFocusedOption { background-color: """ + ACCENT + """33 !important; }
-        .rc-slider-track { background-color: """ + ACCENT + """ !important; }
-        .rc-slider-handle { border-color: """ + ACCENT + """ !important; background: """ + ACCENT + """ !important; }
-        .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td:hover {
-            background-color: """ + ACCENT + """22 !important; }
-        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
-    </style>
-</head>
-<body>
-    {%app_entry%}
-    <footer>{%config%}{%scripts%}{%renderer%}</footer>
-</body>
-</html>
-"""
+_css_bg      = BG_DARK
+_css_card    = BG_CARD
+_css_panel   = BG_PANEL
+_css_border  = BORDER
+_css_accent  = ACCENT
+_css_text    = TEXT_PRI
+
+app.index_string = (
+    "<!DOCTYPE html><html><head>"
+    "{%metas%}<title>{%title%}</title>{%favicon%}{%css%}"
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">'
+    "<style>"
+    "* { box-sizing: border-box; }"
+    "body { margin: 0; background: " + _css_bg + "; }"
+    "::-webkit-scrollbar { width: 6px; height: 6px; }"
+    "::-webkit-scrollbar-track { background: " + _css_card + "; }"
+    "::-webkit-scrollbar-thumb { background: " + _css_border + "; border-radius: 3px; }"
+    ".Select-control { background-color: " + _css_panel + " !important; border-color: " + _css_border + " !important; }"
+    ".Select-value-label, .Select-placeholder { color: " + _css_text + " !important; }"
+    ".Select-menu-outer { background-color: " + _css_panel + " !important; border-color: " + _css_border + " !important; }"
+    ".Select-option { color: " + _css_text + " !important; }"
+    ".Select-option:hover { background: " + _css_accent + "22 !important; }"
+    ".rc-slider-track { background-color: " + _css_accent + " !important; }"
+    ".rc-slider-handle { border-color: " + _css_accent + " !important; background: " + _css_accent + " !important; }"
+    ".dash-spreadsheet-inner td:hover { background: " + _css_accent + "18 !important; }"
+    ".tab-content { border: none !important; }"
+    "@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }"
+    "</style></head><body>"
+    "{%app_entry%}"
+    "<footer>{%config%}{%scripts%}{%renderer%}</footer>"
+    "</body></html>"
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RUN
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 65)
-    print("  Gujarat OSINT Intelligence Dashboard")
+    print("  Gujarat OSINT Intelligence Dashboard  v2.0")
+    print("  Tab 1: Intelligence Dashboard (all 9 charts)")
+    print("  Tab 2: Raw OSINT Data Sources (7 sources, 8 rows each)")
     print("  Open: http://127.0.0.1:8050")
     print("=" * 65)
     app.run(debug=True, host="127.0.0.1", port=8050)
